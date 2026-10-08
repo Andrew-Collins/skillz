@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+#
+# flimpl - spawn the standard two-pane window in the current tmux session
+#
+# usage: flimpl <name> <dir> [input]
+#
+#   <name>   window name (required)
+#   <dir>    working directory for the window and the right (opencode) pane
+#            (required)
+#   [input]  prompt for the right pane: opencode --prompt '<input>'
+#            (right pane runs plain `opencode` when omitted or empty)
+#
+# env:
+#   TUICR_DIR  working directory for the left (tuicr) pane (default: <dir>)
+#   TUICR_CMD  command for the left pane (default: tuicr -w)
+#
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# baked-in layout and pane commands - edit here
+# ---------------------------------------------------------------------------
+LEFT_CMD=${TUICR_CMD:-'tuicr -w'} # command for the left pane
+RIGHT_BIN='opencode'             # command for the right pane
+RIGHT_PROMPT_FLAG='--prompt'     # flag used to pass [input] to RIGHT_BIN
+LEFT_WIDTH_PCT=50                # left pane width, percent of the window
+# ---------------------------------------------------------------------------
+
+die() { printf 'flimpl: %s\n' "$*" >&2; exit 1; }
+usage() { printf 'usage: flimpl <name> <dir> [input]\n' >&2; exit 2; }
+
+(( $# == 2 || $# == 3 )) || usage
+name=$1
+dir=$2
+input=${3-}
+tuicr_dir=${TUICR_DIR:-$dir}
+
+[[ -n ${TMUX:-} ]] || die 'must be run from inside a tmux session'
+[[ -n $name ]] || die 'window name must not be empty'
+[[ $name != *:* ]] || die "window name must not contain ':': $name"
+[[ -d $dir ]] || die "no such directory: $dir"
+[[ -d $tuicr_dir ]] || die "no such tuicr directory: $tuicr_dir"
+
+while [[ $input == *$'\n' ]]; do input=${input%$'\n'}; done
+
+shellquote() { # POSIX single-quote, understood by fish and sh alike
+  local s=${1//\'/\'\\\'\'}
+  printf "'%s'" "$s"
+}
+
+wait_ready() { # wait until the pane shell has drawn its prompt
+  local pane=$1 cur i
+  for ((i = 0; i < 50; i++)); do
+    cur=$(tmux display-message -p -t "$pane" '#{cursor_x},#{cursor_y}' 2>/dev/null) \
+      || die "window '$name' did not appear"
+    [[ $cur != 0,0 ]] && return 0
+    sleep 0.05
+  done
+}
+
+run_in() { # paste a command literally, then execute it
+  local pane=$1 text=$2 buf="flimpl-$$"
+  printf '%s' "$text" | tmux load-buffer -b "$buf" -
+  tmux paste-buffer -d -p -b "$buf" -t "$pane"
+  tmux send-keys -t "$pane" Enter
+}
+
+if tmux list-windows -F '#{window_name}' | grep -Fxq -- "$name"; then
+  die "window '$name' already exists in this session"
+fi
+
+tmux new-window -d -n "$name" -c "$tuicr_dir" \; \
+  split-window -t ":$name" -h -p "$LEFT_WIDTH_PCT" -c "$dir" \; \
+  set-window-option -t ":$name" automatic-rename off \; \
+  set-window-option -t ":$name" allow-rename off
+
+if [[ -n $input ]]; then
+  right_cmd="$RIGHT_BIN $RIGHT_PROMPT_FLAG $(shellquote "$input")"
+else
+  right_cmd=$RIGHT_BIN
+fi
+
+wait_ready ":$name.0"
+run_in ":$name.0" "$LEFT_CMD"
+wait_ready ":$name.1"
+run_in ":$name.1" "$right_cmd"
